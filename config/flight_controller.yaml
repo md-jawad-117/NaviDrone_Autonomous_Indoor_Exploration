@@ -1,0 +1,58 @@
+# Waypoint-following controller parameters (control/scripted_flight.py).
+
+arrival_radius: 0.3      # meters; switch to next waypoint within this distance. Was 0.5,
+                           # which let the drone "arrive" and turn back before actually
+                           # penetrating into a room if the goal point was near its edge.
+kp_yaw: 2.0                # proportional gain, yaw error (rad) -> normalized yaw rate
+kp_linear: 0.85              # proportional gain, distance (m) -> normalized forward speed (was
+                               # 0.5, then 0.7; reaches max commanded speed sooner given
+                               # house_config's higher max_linear_speed, instead of just
+                               # cruising at a fraction of it)
+kp_vertical: 0.8             # proportional gain, height error (m) -> normalized vertical speed
+
+# Stuck detection/recovery (see WaypointController._update_stuck_tracking):
+# an A*-planned path can be geometrically fine in the discretized grid but
+# still clip a doorway edge in continuous space and get physically wedged.
+stuck_check_interval: 240      # physics steps (~2s) between progress checks
+stuck_progress_threshold: 0.15  # meters; below this counts as "stuck" this interval
+max_stuck_intervals: 1            # consecutive stuck intervals before triggering an escape
+escape_duration_steps: 120         # physics steps (~1s) to back up + strafe + turn
+max_escape_attempts: 3               # give up on the current waypoint after this many escapes
+
+# Scan-in-place at designated waypoints (see WaypointController's scan_indices
+# param): a straight dash into a room and back out only shows the camera
+# whatever's directly ahead, missing walls to the sides. 1.0 normalized yaw
+# rate = 60 deg/s (drone.max_yaw_rate_deg's full value, the fastest this can
+# turn at all); 770 steps = 6.4s at 120Hz physics, still ~385 degrees (a
+# little over a full 360 for margin). (Was 0.85/900 steps = 51 deg/s over
+# 7.5s = 382.5 degrees; before that 0.5/1500 steps = 30 deg/s over 12.5s --
+# faster again per request.)
+scan_yaw_rate: 1.0
+scan_duration_steps: 770
+
+# A patrol route through the house (config/house_config.yaml). Each leg was
+# verified collision-free with a straight-line raycast before committing to it
+# (the controller has no obstacle avoidance, it's a straight-line pursuit, so
+# every leg must have clear line-of-sight to the next). Extended from the
+# original central-area-only route to also enter both side rooms through
+# their actual doorway openings (found by scanning the walls for gaps):
+# left room's doorway is around x=2.7-3.3 at y~6.1; right room has two
+# openings, around x=7.7-8.3 and x=9.5-10.1, at the same wall.
+waypoints:
+  - [5.5, 5.5, 1.0]    # start, clear center patch
+  - [2.0, 5.5, 1.0]
+  - [3.0, 5.8, 1.0]      # left room doorway threshold
+  - [2.0, 8.5, 1.0]       # inside left room (bedroom)
+  - [3.0, 5.8, 1.0]        # back through doorway
+  - [2.0, 5.5, 1.0]
+  - [5.5, 5.5, 1.0]
+  - [5.5, 3.0, 1.0]
+  - [8.0, 5.5, 1.0]
+  - [8.0, 5.8, 1.0]         # right room doorway threshold
+  - [8.0, 9.0, 1.0]          # inside right room (dining/bed area)
+  - [8.0, 5.8, 1.0]           # back through doorway
+  - [8.0, 5.5, 1.0]
+  - [5.5, 5.5, 1.0]
+  - [5.5, 8.0, 1.0]
+  - [7.0, 7.0, 1.0]
+  - [5.5, 5.5, 1.0]    # return to start

@@ -1,0 +1,190 @@
+<?xml version="1.0"?>
+<robot name="quadrotor">
+
+  <link name="base_link">
+    <inertial>
+      <mass value="0.5"/>
+      <inertia ixx="0.0023" ixy="0" ixz="0" iyy="0.0023" iyz="0" izz="0.004"/>
+    </inertial>
+    <visual>
+      <geometry>
+        <box size="0.18 0.18 0.04"/>
+      </geometry>
+      <material name="body_grey">
+        <color rgba="0.2 0.2 0.25 1"/>
+      </material>
+    </visual>
+    <collision>
+      <geometry>
+        <box size="0.18 0.18 0.04"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- 4 arms, cross layout, purely visual. Each arm is a horizontal cylinder
+       spanning from the body center out to its corner (0.13, 0.13, 0) etc --
+       joint origin is the arm's midpoint, rpy lays the cylinder flat (pitch
+       90 deg turns its default vertical axis into the horizontal plane) and
+       points it at the corner (yaw = corner's azimuth angle). Length 0.184 =
+       true corner distance (0.13*sqrt(2)), so it reaches exactly body-center
+       to corner with no gap or overhang. -->
+  <link name="arm_fr">
+    <inertial><mass value="0.01"/><inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/></inertial><visual><geometry><cylinder radius="0.01" length="0.184"/></geometry>
+      <material name="arm"><color rgba="0.1 0.1 0.1 1"/></material></visual>
+  </link>
+  <joint name="j_arm_fr" type="fixed">
+    <parent link="base_link"/><child link="arm_fr"/>
+    <origin xyz="0.065 0.065 0" rpy="0 1.5708 0.785398"/>
+  </joint>
+
+  <link name="arm_fl">
+    <inertial><mass value="0.01"/><inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/></inertial><visual><geometry><cylinder radius="0.01" length="0.184"/></geometry>
+      <material name="arm"><color rgba="0.1 0.1 0.1 1"/></material></visual>
+  </link>
+  <joint name="j_arm_fl" type="fixed">
+    <parent link="base_link"/><child link="arm_fl"/>
+    <origin xyz="0.065 -0.065 0" rpy="0 1.5708 -0.785398"/>
+  </joint>
+
+  <link name="arm_br">
+    <inertial><mass value="0.01"/><inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/></inertial><visual><geometry><cylinder radius="0.01" length="0.184"/></geometry>
+      <material name="arm"><color rgba="0.1 0.1 0.1 1"/></material></visual>
+  </link>
+  <joint name="j_arm_br" type="fixed">
+    <parent link="base_link"/><child link="arm_br"/>
+    <origin xyz="-0.065 0.065 0" rpy="0 1.5708 2.356194"/>
+  </joint>
+
+  <link name="arm_bl">
+    <inertial><mass value="0.01"/><inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/></inertial><visual><geometry><cylinder radius="0.01" length="0.184"/></geometry>
+      <material name="arm"><color rgba="0.1 0.1 0.1 1"/></material></visual>
+  </link>
+  <joint name="j_arm_bl" type="fixed">
+    <parent link="base_link"/><child link="arm_bl"/>
+    <origin xyz="-0.065 -0.065 0" rpy="0 1.5708 -2.356194"/>
+  </joint>
+
+  <!-- Motor hub + 2-blade propeller at each arm tip (the corner positions the
+       arms above now reach exactly), just barely above the arm/body plane
+       (z=0.025) so blades don't clip through anything -- a compact, flat
+       quadcopter silhouette instead of propellers on tall stalks. Blades are
+       a thin "+" cross of two flat boxes: a simple, recognizable propeller
+       shape without needing actual rotating geometry. -->
+
+  <link name="hub_fr">
+    <inertial><mass value="0.005"/><inertia ixx="1e-7" ixy="0" ixz="0" iyy="1e-7" iyz="0" izz="1e-7"/></inertial>
+    <visual><geometry><cylinder radius="0.015" length="0.02"/></geometry>
+      <material name="hub"><color rgba="0.08 0.08 0.08 1"/></material></visual>
+  </link>
+  <joint name="j_hub_fr" type="fixed">
+    <parent link="base_link"/><child link="hub_fr"/>
+    <origin xyz="0.13 0.13 0.025"/>
+  </joint>
+  <link name="blade_fr_a">
+    <inertial><mass value="0.002"/><inertia ixx="1e-7" ixy="0" ixz="0" iyy="1e-7" iyz="0" izz="1e-7"/></inertial>
+    <visual><geometry><box size="0.16 0.014 0.002"/></geometry>
+      <material name="blade"><color rgba="0.55 0.55 0.58 0.75"/></material></visual>
+  </link>
+  <joint name="j_blade_fr_a" type="fixed">
+    <parent link="hub_fr"/><child link="blade_fr_a"/><origin xyz="0 0 0.008"/>
+  </joint>
+  <link name="blade_fr_b">
+    <inertial><mass value="0.002"/><inertia ixx="1e-7" ixy="0" ixz="0" iyy="1e-7" iyz="0" izz="1e-7"/></inertial>
+    <visual><geometry><box size="0.16 0.014 0.002"/></geometry>
+      <material name="blade"><color rgba="0.55 0.55 0.58 0.75"/></material></visual>
+  </link>
+  <joint name="j_blade_fr_b" type="fixed">
+    <parent link="hub_fr"/><child link="blade_fr_b"/><origin xyz="0 0 0.008" rpy="0 0 1.5708"/>
+  </joint>
+
+  <link name="hub_fl">
+    <inertial><mass value="0.005"/><inertia ixx="1e-7" ixy="0" ixz="0" iyy="1e-7" iyz="0" izz="1e-7"/></inertial>
+    <visual><geometry><cylinder radius="0.015" length="0.02"/></geometry>
+      <material name="hub"><color rgba="0.08 0.08 0.08 1"/></material></visual>
+  </link>
+  <joint name="j_hub_fl" type="fixed">
+    <parent link="base_link"/><child link="hub_fl"/>
+    <origin xyz="0.13 -0.13 0.025"/>
+  </joint>
+  <link name="blade_fl_a">
+    <inertial><mass value="0.002"/><inertia ixx="1e-7" ixy="0" ixz="0" iyy="1e-7" iyz="0" izz="1e-7"/></inertial>
+    <visual><geometry><box size="0.16 0.014 0.002"/></geometry>
+      <material name="blade"><color rgba="0.55 0.55 0.58 0.75"/></material></visual>
+  </link>
+  <joint name="j_blade_fl_a" type="fixed">
+    <parent link="hub_fl"/><child link="blade_fl_a"/><origin xyz="0 0 0.008"/>
+  </joint>
+  <link name="blade_fl_b">
+    <inertial><mass value="0.002"/><inertia ixx="1e-7" ixy="0" ixz="0" iyy="1e-7" iyz="0" izz="1e-7"/></inertial>
+    <visual><geometry><box size="0.16 0.014 0.002"/></geometry>
+      <material name="blade"><color rgba="0.55 0.55 0.58 0.75"/></material></visual>
+  </link>
+  <joint name="j_blade_fl_b" type="fixed">
+    <parent link="hub_fl"/><child link="blade_fl_b"/><origin xyz="0 0 0.008" rpy="0 0 1.5708"/>
+  </joint>
+
+  <link name="hub_br">
+    <inertial><mass value="0.005"/><inertia ixx="1e-7" ixy="0" ixz="0" iyy="1e-7" iyz="0" izz="1e-7"/></inertial>
+    <visual><geometry><cylinder radius="0.015" length="0.02"/></geometry>
+      <material name="hub"><color rgba="0.08 0.08 0.08 1"/></material></visual>
+  </link>
+  <joint name="j_hub_br" type="fixed">
+    <parent link="base_link"/><child link="hub_br"/>
+    <origin xyz="-0.13 0.13 0.025"/>
+  </joint>
+  <link name="blade_br_a">
+    <inertial><mass value="0.002"/><inertia ixx="1e-7" ixy="0" ixz="0" iyy="1e-7" iyz="0" izz="1e-7"/></inertial>
+    <visual><geometry><box size="0.16 0.014 0.002"/></geometry>
+      <material name="blade"><color rgba="0.55 0.55 0.58 0.75"/></material></visual>
+  </link>
+  <joint name="j_blade_br_a" type="fixed">
+    <parent link="hub_br"/><child link="blade_br_a"/><origin xyz="0 0 0.008"/>
+  </joint>
+  <link name="blade_br_b">
+    <inertial><mass value="0.002"/><inertia ixx="1e-7" ixy="0" ixz="0" iyy="1e-7" iyz="0" izz="1e-7"/></inertial>
+    <visual><geometry><box size="0.16 0.014 0.002"/></geometry>
+      <material name="blade"><color rgba="0.55 0.55 0.58 0.75"/></material></visual>
+  </link>
+  <joint name="j_blade_br_b" type="fixed">
+    <parent link="hub_br"/><child link="blade_br_b"/><origin xyz="0 0 0.008" rpy="0 0 1.5708"/>
+  </joint>
+
+  <link name="hub_bl">
+    <inertial><mass value="0.005"/><inertia ixx="1e-7" ixy="0" ixz="0" iyy="1e-7" iyz="0" izz="1e-7"/></inertial>
+    <visual><geometry><cylinder radius="0.015" length="0.02"/></geometry>
+      <material name="hub"><color rgba="0.08 0.08 0.08 1"/></material></visual>
+  </link>
+  <joint name="j_hub_bl" type="fixed">
+    <parent link="base_link"/><child link="hub_bl"/>
+    <origin xyz="-0.13 -0.13 0.025"/>
+  </joint>
+  <link name="blade_bl_a">
+    <inertial><mass value="0.002"/><inertia ixx="1e-7" ixy="0" ixz="0" iyy="1e-7" iyz="0" izz="1e-7"/></inertial>
+    <visual><geometry><box size="0.16 0.014 0.002"/></geometry>
+      <material name="blade"><color rgba="0.55 0.55 0.58 0.75"/></material></visual>
+  </link>
+  <joint name="j_blade_bl_a" type="fixed">
+    <parent link="hub_bl"/><child link="blade_bl_a"/><origin xyz="0 0 0.008"/>
+  </joint>
+  <link name="blade_bl_b">
+    <inertial><mass value="0.002"/><inertia ixx="1e-7" ixy="0" ixz="0" iyy="1e-7" iyz="0" izz="1e-7"/></inertial>
+    <visual><geometry><box size="0.16 0.014 0.002"/></geometry>
+      <material name="blade"><color rgba="0.55 0.55 0.58 0.75"/></material></visual>
+  </link>
+  <joint name="j_blade_bl_b" type="fixed">
+    <parent link="hub_bl"/><child link="blade_bl_b"/><origin xyz="0 0 0.008" rpy="0 0 1.5708"/>
+  </joint>
+
+  <!-- Front marker: kept as a simple, unambiguous heading cue (propeller
+       colors are neutral/identical across all 4, so this is the only
+       at-a-glance way to tell which way the drone is facing). -->
+  <link name="rotor_front">
+    <inertial><mass value="0.01"/><inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/></inertial><visual><geometry><sphere radius="0.025"/></geometry>
+      <material name="front_marker"><color rgba="1.0 0.4 0.0 1"/></material></visual>
+  </link>
+  <joint name="j_rotor_front" type="fixed">
+    <parent link="base_link"/><child link="rotor_front"/>
+    <origin xyz="0.13 0 0.01"/>
+  </joint>
+
+</robot>

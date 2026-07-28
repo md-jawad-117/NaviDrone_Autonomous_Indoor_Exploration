@@ -1,0 +1,107 @@
+# Visual odometry / SLAM front-end parameters.
+
+vo:
+  orb_features: 800
+  fast_threshold: 7                # ORB's default (20) misses most corners on this house's
+                                    # plain walls (measured: 38 keypoints on a hard frame);
+                                    # loosening this -- a detection *sensitivity* knob, distinct
+                                    # from orb_features which is just a budget cap -- found 111
+  edge_threshold: 10                # default 31 excludes a border where corners often sit on
+                                    # these flat walls; combined with fast_threshold got 148
+  nlevels: 12                        # more pyramid levels for scale-invariance; got 167 combined
+  ratio_test_threshold: 0.75      # Lowe's ratio test for match filtering
+  min_matches: 15                  # below this raw 2D match count, don't bother with PnP
+  min_pnp_points: 8                 # below this *depth-valid* 3D-2D correspondence count,
+                                     # skip PnP (many raw matches land on far-plane/no-return
+                                     # depth pixels -- e.g. doorways/windows -- so this is
+                                     # deliberately lower than min_matches)
+  ransac_reproj_threshold: 4.0     # pixels, for solvePnPRansac
+  ransac_confidence: 0.99
+  ransac_iterations: 200
+  max_valid_depth: 15.0             # meters, ignore depth beyond this for backprojection
+  min_valid_depth: 0.1
+  max_translation_per_frame: 0.25    # meters; a "confident" PnP solve past this is rejected
+  max_rotation_deg_per_frame: 20.0    # degrees; same idea, for implausible rotation jumps
+  hold_frames_before_decay: 15         # keep repeating the last known-good relative motion
+                                       # unchanged for this many consecutive failures (handles
+                                       # sustained motion, e.g. a continuous yaw spin, without
+                                       # the estimate lagging behind); only after this many
+                                       # straight failures do we start assuming tracking is
+                                       # genuinely lost and decay toward stationary
+  fallback_decay: 0.7                 # shrink the constant-velocity guess per failure *after*
+                                       # hold_frames_before_decay is exceeded
+
+keyframe:
+  translation_thresh: 0.25          # meters since last keyframe
+  rotation_thresh_deg: 12.0          # degrees since last keyframe
+
+mapping:
+  pixel_stride: 2                    # subsample every Nth pixel when backprojecting depth
+                                       # (was 4; lower = denser cloud, ~4x more raw points)
+  min_depth: 0.1
+  max_depth: 8.0                     # meters, ignore far/noisy returns for mapping
+  voxel_size: 0.025                  # meters, downsampling resolution for the merged map
+                                       # (was 0.05; finer = less aggressive merging, denser map)
+  flush_every_n_frames: 10           # merge+downsample the point buffer this often
+
+loop_closure:
+  skip_recent_keyframes: 5            # don't try to match a keyframe against its own
+                                       # temporal neighbors -- that's just VO, not a real loop
+  ratio_test_threshold: 0.75
+  min_matches: 8                       # this house's flat walls yield ~30-50 ORB keypoints per
+                                        # frame total, so 20 (a reasonable bar for richer scenes)
+                                        # was never reachable here -- calibrated to match what
+                                        # VO's own min_pnp_points needed for the same reason
+  min_pnp_points: 6
+  ransac_reproj_threshold: 4.0
+  ransac_confidence: 0.99
+  ransac_iterations: 300
+  max_valid_depth: 15.0
+  min_valid_depth: 0.1
+  max_vo_disagreement_m: 3.0            # reject a candidate closure if it implies the drone
+                                          # teleported further than VO's own (drifted) estimate
+                                          # thinks plausible -- catches coincidental false
+                                          # matches between visually-similar-but-distant spots
+  max_vo_disagreement_deg: 60.0
+
+occupancy_grid:
+  x_min: 0.0                # meters; covers this house's ~10.4 x 11.8 m footprint with margin
+  x_max: 11.2
+  y_min: 0.0
+  y_max: 12.6
+  resolution: 0.05           # meters per cell
+  min_height: 0.15            # ignore floor points
+  max_height: 2.2              # ignore near-ceiling points
+  occupied_point_threshold: 3    # a cell needs at least this many hits to count as occupied
+  known_geometry_z_range: [0.05, 1.9]   # for build_from_known_geometry. Must start near 0.05
+                                          # (empirically: PyBullet's raycast against this concave
+                                          # mesh unreliably misses solid walls if the ray doesn't
+                                          # start close to the floor -- a raycasting quirk, not
+                                          # geometry) and stop below ~2.0m to avoid door headers/
+                                          # frames, which otherwise falsely block every doorway
+                                          # (confirmed: a doorway ray hit something at z=2.04m
+                                          # even though the opening is clear at flight height).
+
+room_detection:
+  inflate_radius_m: 0.2      # was 0.1, then 0.15; a bit more buffer from walls/doorway
+                              # edges per request -- verified this still leaves every
+                              # doorway passable (narrowest is ~0.6m) before bumping it up
+  min_room_radius_m: 0.45     # meters from nearest wall to count as "roomy", not just a corridor.
+                               # Was 0.5; a cluttered room's best interior point can be only just
+                               # over the drone's own clearance margin.
+  suppression_radius_m: 2.2   # after picking a room center, clear this radius before the next
+                               # pick. Was 3.5, tuned to keep the large central area to one goal --
+                               # but that also swallowed a real room whose best point (near its
+                               # doorway, since the room itself is cluttered) happened to fall
+                               # within 3.5m of an unrelated corridor goal, and the room went
+                               # completely unvisited. 2.2 costs more redundant goals in the big
+                               # open area but reliably covers every real room.
+
+pose_graph:
+  sequential_weight: 1.0              # trust weight for consecutive-keyframe (VO) edges
+  loop_weight: 1.0                     # trust weight for loop-closure edges
+  f_scale: 0.5                          # huber loss transition point (residual units are a mix
+                                         # of meters and radians); residuals past this are
+                                         # down-weighted instead of dominating the fit -- guards
+                                         # against a handful of marginal/imprecise loop edges
+                                         # warping the rest of the trajectory
