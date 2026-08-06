@@ -28,9 +28,11 @@ house). The ceiling is auto-detected (by name first, falling back to a
 geometric heuristic: a thin, high, wide slab) -- see detect_ceiling_nodes --
 so this should work unmodified on a different house file.
 """
+import gc
 import os
 import re
 import sys
+import tempfile
 
 import numpy as np
 import trimesh
@@ -39,6 +41,27 @@ from PIL import Image
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_SRC_GLB = os.path.join(ROOT, "3d Model", "room.glb")
 OUT_DIR = os.path.join(ROOT, "env", "assets", "house")
+
+# See decimate_scene_geometry's docstring: PyBullet's visual mesh loader can
+# fail to render at all well before a mesh gets anywhere near this dense --
+# a ~1.45M-face house rendered as entirely blank with no error. Two known
+# empirical data points on this project: this project's original house
+# (542,085 faces) rendered perfectly fine with NO decimation involved at all;
+# a heavily furnished variant at ~1.45M faces rendered entirely blank.
+#
+# REVERTED to 800k on 2026-08-06 after briefly trying 1.5M: that let a
+# 1,462,925-face house skip decimation entirely (since it was just under the
+# new threshold), and the undecimated mesh then ran out of memory inside
+# build_scene()'s own geometry-copying step -- a different crash than the
+# original blank-render bug, but the same root cause (too much raw geometry
+# held/copied in memory at once).
+#
+# EXPERIMENT (2026-08-06): trying 1.0M -- still comfortably below the
+# ~1.2M ceiling noted above and well below the known-bad ~1.45M blank-render
+# point, but higher than the confirmed-working 800k, to see if furniture
+# keeps a bit more detail without tripping either failure mode. Revert to
+# 800k if this house goes blank or runs out of memory again.
+TARGET_TOTAL_FACES = 1_200_000
 
 # glTF's scene graph is Y-up (confirmed: scene.bounds shows a ~2.5 m span on Y,
 # matching ceiling height); PyBullet is Z-up. +90 deg rotation about X maps
@@ -101,6 +124,137 @@ def detect_ceiling_nodes(scene: trimesh.Scene) -> set:
     return candidates
 
 
+_STRUCTURAL_NAME_KEYWORDS = ("wall", "floor", "ceiling", "roof", "trim", "baseboard", "window", "door")
+
+
+def _is_structural_name(node_name: str) -> bool:
+    lname = node_name.lower()
+    return lname.startswith("room__") or any(kw in lname for kw in _STRUCTURAL_NAME_KEYWORDS)
+
+
+def _decimate_preserving_color(geom: "trimesh.Trimesh", target_faces: int) -> "trimesh.Trimesh":
+    """Quadric-decimates geom to target_faces, then recovers each new vertex's
+    color via nearest-neighbor lookup back to the pre-decimation mesh.
+
+    trimesh.simplify_quadric_decimation silently resets vertex_colors to a
+    flat default grey (confirmed empirically -- not documented behavior),
+    which is why a first attempt at this rendered every decimated object as
+    uniform grey instead of its baked material color."""
+    try:
+        orig_colors = geom.visual.to_color().vertex_colors.copy()
+    except Exception:
+        orig_colors = None
+    orig_vertices = geom.vertices.copy()
+
+    simplified = geom.simplify_quadric_decimation(face_count=target_faces)
+
+    if orig_colors is not None and len(orig_vertices) > 0 and len(simplified.vertices) > 0:
+        from scipy.spatial import cKDTree
+        tree = cKDTree(orig_vertices)
+        _, idx = tree.query(simplified.vertices)
+        simplified.visual = trimesh.visual.ColorVisuals(
+            mesh=simplified, vertex_colors=orig_colors[idx])
+
+    return simplified
+
+
+def decimate_scene_geometry(scene: trimesh.Scene, target_total_faces: int, min_faces_per_mesh: int = 20,
+                             min_retention_fraction: float = 0.35):
+    """
+    Reduces total face count via quadric decimation, applied ONLY to
+    furniture/prop geometry -- architectural pieces (walls, floor, trim,
+    baseboard, window frames; detected by name, see _is_structural_name) are
+    left at full resolution. Mutates scene.geometry in place.
+
+    Why this exists: PyBullet's createVisualShape doesn't just get slow with
+    a very dense combined mesh, it can fail to render at all -- confirmed on
+    this project: a furnished house GLB exported at ~1.45M faces for the
+    visual mesh alone, and the result was a completely blank main viewport,
+    blank synthetic-camera RGB panel, and depth reading as pure far-plane for
+    every pixel (so 0 valid points ever reached the SLAM/mapping pipeline),
+    with no error raised anywhere -- collision mesh loading worked fine at an
+    even larger face count, since Bullet's physics-mesh path handles large
+    meshes differently than the visual-shape path.
+
+    A first version of this decimated every mesh uniformly (structural
+    geometry included) and broke things worse than the original problem:
+    flat grey rendering (see _decimate_preserving_color) and a badly holed
+    floor/walls that made the occupancy-grid raycasts used for room
+    detection find almost nothing. Architectural geometry is comparatively
+    cheap face-count-wise anyway (a few hundred thousand faces here) and is
+    exactly the geometry raycasting depends on being topologically intact --
+    the actual bloat is almost always in furniture/prop meshes, which are
+    visually forgiving to simplify.
+
+    A second issue showed up even with structural geometry excluded: at this
+    house's actual ratio (~20% of original faces per furniture item to hit a
+    400k budget), thin double-walled objects -- an appliance's outer shell,
+    where the inner and outer surface sit very close together -- got holes
+    punched clean through them. Quadric decimation optimizes for geometric
+    error, not "stay watertight," and doesn't know it's collapsing a shell
+    rather than a solid. min_retention_fraction is a hard floor (default:
+    never remove more than 65% of any single mesh's faces, i.e. always keep
+    >= 35%) applied on top of the global ratio, so a handful of especially
+    detailed objects don't get sacrificed just to hit the nominal total --
+    the actual post-decimation total is allowed to land above
+    target_total_faces as a result, and is printed so you can see by how much.
+
+    Simplifying is applied once, right after loading, so both the visual and
+    collision exports derive from the same (mostly) reduced geometry.
+    """
+    geom_node_names = {}
+    for node_name in scene.graph.nodes_geometry:
+        _, geom_name = scene.graph[node_name]
+        geom_node_names.setdefault(geom_name, []).append(node_name)
+
+    structural_faces = 0
+    decimatable = {}  # geom_name -> n_faces
+    for geom_name, geom in scene.geometry.items():
+        n_faces = len(geom.faces)
+        names = geom_node_names.get(geom_name, [geom_name])
+        if any(_is_structural_name(n) for n in names):
+            structural_faces += n_faces
+        else:
+            decimatable[geom_name] = n_faces
+
+    decimatable_total = sum(decimatable.values())
+    total = structural_faces + decimatable_total
+    print(f"Scene: {total} faces total ({structural_faces} structural -- kept at full resolution; "
+          f"{decimatable_total} across {len(decimatable)} furniture/prop meshes -- decimatable)")
+
+    if total <= target_total_faces:
+        print(f"Already within the {target_total_faces} target; skipping decimation.")
+        return
+
+    budget_for_decimatable = max(0, target_total_faces - structural_faces)
+    if decimatable_total == 0 or budget_for_decimatable <= 0:
+        print(f"WARNING: structural geometry alone ({structural_faces} faces) already meets/exceeds the "
+              f"{target_total_faces} target; nothing decimatable can bring this under budget without "
+              f"touching structural geometry, which this intentionally avoids. Consider raising "
+              f"target_total_faces instead.")
+        return
+
+    ratio = budget_for_decimatable / decimatable_total
+    print(f"Decimating furniture/prop meshes: {decimatable_total} faces -> ~{budget_for_decimatable} "
+          f"target (ratio {ratio:.4f}, floored at {min_retention_fraction:.0%} retention per mesh)")
+    for geom_name, n_faces in decimatable.items():
+        if n_faces <= min_faces_per_mesh:
+            continue
+        target = max(min_faces_per_mesh, int(n_faces * ratio), int(n_faces * min_retention_fraction))
+        if target >= n_faces:
+            continue
+        try:
+            scene.geometry[geom_name] = _decimate_preserving_color(scene.geometry[geom_name], target)
+        except Exception as e:
+            print(f"  WARNING: could not simplify '{geom_name}' ({n_faces} faces): {e}")
+
+    new_total = sum(len(g.faces) for g in scene.geometry.values())
+    print(f"Decimation done: {new_total} faces total.")
+
+    new_total = sum(len(g.faces) for g in scene.geometry.values())
+    print(f"Decimation done: {new_total} faces total.")
+
+
 def build_scene(scene: trimesh.Scene, exclude_nodes: set) -> trimesh.Scene:
     """Returns a new Scene containing only nodes not in exclude_nodes, with
     each geometry's world transform baked in (since multiple nodes can share
@@ -131,48 +285,68 @@ def _assign_materials_to_colorvisuals_objects(obj_path: str, mtl_path: str, out_
     color columns back to plain "v x y z" so every vertex line in the file has
     a consistent, standard format.
     """
-    with open(obj_path, "r") as f:
-        obj_lines = f.readlines()
+    def _strip_color(bl):
+        if bl.startswith("v "):
+            parts = bl.split()
+            return f"v {parts[1]} {parts[2]} {parts[3]}\n"
+        return bl
 
-    new_obj_lines = []
+    # Streams the file line-by-line instead of loading it wholesale (as an
+    # earlier version did via f.readlines()) -- fine for small houses, but a
+    # multi-hundred-MB / multi-million-line OBJ (dense source meshes) blew
+    # past available memory just holding that many Python line objects twice
+    # over (once as the read list, once as the rewritten list). The only
+    # lookahead needed per vertex-color-only object block is up to its first
+    # "v " line (to read the color) -- typically the very first line in the
+    # block -- so buffering stays tiny even if the block itself has millions
+    # of vertices after that point.
     new_materials = []  # (name, (r, g, b))
-    i, n = 0, len(obj_lines)
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=out_dir, suffix=".obj.tmp")
+    os.close(tmp_fd)
 
-    while i < n:
-        line = obj_lines[i]
-        if not line.startswith("o "):
-            new_obj_lines.append(line)
-            i += 1
-            continue
+    with open(obj_path, "r") as fin, open(tmp_path, "w") as fout:
+        line = fin.readline()
+        while line:
+            if not line.startswith("o "):
+                fout.write(line)
+                line = fin.readline()
+                continue
 
-        obj_name = line.strip().split(maxsplit=1)[1]
-        new_obj_lines.append(line)
-        i += 1
+            obj_name = line.strip().split(maxsplit=1)[1]
+            fout.write(line)
+            line = fin.readline()
 
-        if i < n and obj_lines[i].strip().startswith("usemtl"):
-            # Already has a real material -- leave this object's block untouched.
-            continue
+            if line.startswith("usemtl"):
+                # Already has a real material -- leave this object's block untouched.
+                fout.write(line)
+                line = fin.readline()
+                continue
 
-        block_start = i
-        color = None
-        while i < n and not obj_lines[i].startswith("o "):
-            if color is None and obj_lines[i].startswith("v "):
-                parts = obj_lines[i].split()
-                if len(parts) >= 7:
-                    color = tuple(float(x) for x in parts[4:7])
-            i += 1
-        block_end = i
+            pending = []
+            color = None
+            while line and not line.startswith("o "):
+                pending.append(line)
+                if color is None and line.startswith("v "):
+                    parts = line.split()
+                    if len(parts) >= 7:
+                        color = tuple(float(x) for x in parts[4:7])
+                    line = fin.readline()
+                    break
+                line = fin.readline()
 
-        mtl_name = f"AutoColor_{obj_name}"
-        new_obj_lines.append(f"usemtl {mtl_name}\n")
-        new_materials.append((mtl_name, color or (0.5, 0.5, 0.5)))
+            mtl_name = f"AutoColor_{obj_name}"
+            fout.write(f"usemtl {mtl_name}\n")
+            new_materials.append((mtl_name, color or (0.5, 0.5, 0.5)))
 
-        for bl in obj_lines[block_start:block_end]:
-            if bl.startswith("v "):
-                parts = bl.split()
-                new_obj_lines.append(f"v {parts[1]} {parts[2]} {parts[3]}\n")
-            else:
-                new_obj_lines.append(bl)
+            for bl in pending:
+                fout.write(_strip_color(bl))
+            # Rest of the block (after the line the color was read from)
+            # streams straight through, no further buffering needed.
+            while line and not line.startswith("o "):
+                fout.write(_strip_color(line))
+                line = fin.readline()
+
+    os.replace(tmp_path, obj_path)
 
     if new_materials:
         # Kd only -- _bake_material_colors_as_textures (called right after
@@ -185,9 +359,6 @@ def _assign_materials_to_colorvisuals_objects(obj_path: str, mtl_path: str, out_
                 f.write(f"Kd {r:.8f} {g:.8f} {b:.8f}\n")
                 f.write("Ks 0.40000000 0.40000000 0.40000000\n")
                 f.write("Ns 1.00000000\n")
-
-    with open(obj_path, "w") as f:
-        f.writelines(new_obj_lines)
 
     print(f"Assigned {len(new_materials)} new materials to previously vertex-color-only objects: "
           f"{[name for name, _ in new_materials]}")
@@ -261,42 +432,44 @@ def _bake_material_colors_as_textures(obj_path: str, mtl_path: str, out_dir: str
     # retarget every face's texture-coordinate index to whichever material
     # is currently active (tracked via "usemtl"), replacing any old vt index
     # (e.g. the single shared dummy point a prior version of this script used).
-    with open(obj_path, "r") as f:
-        obj_lines = f.readlines()
-
+    # Streamed line-by-line for the same reason as the pass above -- no
+    # lookahead needed here at all, just O(1) running state, so there's no
+    # reason to ever hold the full file in memory.
     vt_index_by_name = {name: i + 1 for i, name in enumerate(materials)}  # OBJ indices are 1-based
     vt_lines = [f"vt {material_uv[name][0]:.6f} {material_uv[name][1]:.6f}\n" for name in materials]
     face_token_re = re.compile(r"^(\d+)(?:/(\d*))?(?:/(\d*))?$")
 
-    new_obj_lines = []
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=out_dir, suffix=".obj.tmp2")
+    os.close(tmp_fd)
+
     current_mtl = None
     inserted_vt = False
-    for line in obj_lines:
-        stripped = line.strip()
-        if stripped.startswith("vt "):
-            continue  # drop old vt lines -- replaced wholesale below
-        if stripped.startswith("mtllib") and not inserted_vt:
-            new_obj_lines.append(line)
-            new_obj_lines.extend(vt_lines)
-            inserted_vt = True
-            continue
-        if stripped.startswith("usemtl "):
-            current_mtl = stripped.split(maxsplit=1)[1]
-            new_obj_lines.append(line)
-            continue
-        if stripped.startswith("f ") and current_mtl in vt_index_by_name:
-            vt_idx = vt_index_by_name[current_mtl]
-            new_tokens = []
-            for token in stripped.split()[1:]:
-                m = face_token_re.match(token)
-                v_idx, _, vn_idx = m.groups()
-                new_tokens.append(f"{v_idx}/{vt_idx}/{vn_idx}" if vn_idx else f"{v_idx}/{vt_idx}")
-            new_obj_lines.append("f " + " ".join(new_tokens) + "\n")
-        else:
-            new_obj_lines.append(line)
+    with open(obj_path, "r") as fin, open(tmp_path, "w") as fout:
+        for line in fin:
+            stripped = line.strip()
+            if stripped.startswith("vt "):
+                continue  # drop old vt lines -- replaced wholesale below
+            if stripped.startswith("mtllib") and not inserted_vt:
+                fout.write(line)
+                fout.writelines(vt_lines)
+                inserted_vt = True
+                continue
+            if stripped.startswith("usemtl "):
+                current_mtl = stripped.split(maxsplit=1)[1]
+                fout.write(line)
+                continue
+            if stripped.startswith("f ") and current_mtl in vt_index_by_name:
+                vt_idx = vt_index_by_name[current_mtl]
+                new_tokens = []
+                for token in stripped.split()[1:]:
+                    m = face_token_re.match(token)
+                    v_idx, _, vn_idx = m.groups()
+                    new_tokens.append(f"{v_idx}/{vt_idx}/{vn_idx}" if vn_idx else f"{v_idx}/{vt_idx}")
+                fout.write("f " + " ".join(new_tokens) + "\n")
+            else:
+                fout.write(line)
 
-    with open(obj_path, "w") as f:
-        f.writelines(new_obj_lines)
+    os.replace(tmp_path, obj_path)
 
 
 def main():
@@ -312,25 +485,40 @@ def main():
     all_nodes = set(scene.graph.nodes_geometry)
     print(f"Loaded {len(all_nodes)} nodes from {src_glb}")
 
+    decimate_scene_geometry(scene, target_total_faces=TARGET_TOTAL_FACES)
+
     exclude_from_visual = detect_ceiling_nodes(scene)
     print(f"Excluding from visual mesh: {exclude_from_visual}")
-
-    visual_scene = build_scene(scene, exclude_from_visual)
-    collision_scene = build_scene(scene, exclude_nodes=set())
 
     visual_path = os.path.join(OUT_DIR, "house_visual.obj")
     collision_path = os.path.join(OUT_DIR, "house_collision.obj")
 
+    # Build + export + free one derived scene at a time instead of holding
+    # both visual_scene and collision_scene (each its own full baked-geometry
+    # copy) in memory simultaneously -- collision includes nearly everything
+    # visual does plus more, so building both upfront nearly doubles peak
+    # memory right before the heaviest step (trimesh's own OBJ export), which
+    # is exactly where a dense/heavy source mesh ran out of memory.
+    visual_scene = build_scene(scene, exclude_from_visual)
+    visual_parts = len(visual_scene.geometry)
     visual_scene.export(visual_path)
+    del visual_scene
+    gc.collect()
+
+    collision_scene = build_scene(scene, exclude_nodes=set())
+    collision_parts = len(collision_scene.geometry)
+    collision_bounds = collision_scene.bounds.tolist()
     collision_scene.export(collision_path)
+    del collision_scene
+    gc.collect()
 
     mtl_path = os.path.join(OUT_DIR, "material.mtl")
     _bake_material_colors_as_textures(visual_path, mtl_path, OUT_DIR)
     print(f"Baked material Kd colors into textures for PyBullet compatibility -> {mtl_path}")
 
-    print(f"Wrote visual mesh   ({len(visual_scene.geometry)} parts) -> {visual_path}")
-    print(f"Wrote collision mesh ({len(collision_scene.geometry)} parts) -> {collision_path}")
-    print(f"Overall bounds (collision mesh): {collision_scene.bounds.tolist()}")
+    print(f"Wrote visual mesh   ({visual_parts} parts) -> {visual_path}")
+    print(f"Wrote collision mesh ({collision_parts} parts) -> {collision_path}")
+    print(f"Overall bounds (collision mesh): {collision_bounds}")
 
 
 if __name__ == "__main__":
